@@ -1,24 +1,41 @@
 local M = {}
 
--- Define default options.
-local default_opts = {
-	width = 40, -- window width in characters
-	height = 20, -- window height in logical lines
-	row = 1,
-	col = vim.o.columns - 45,
-	border = "single",
-	title = { { "Twitch Chat" } },
-	title_pos = "right",
-	winblend = 90, -- transparency for window
-	max_lines = 100, -- maximum number of buffer lines to keep
-	channel = "shimmythedev", -- default channel
-	client_id = "", -- required: your Twitch API client ID
-	client_secret = "", -- required: your Twitch API client secret
-}
+-- Helper function to wrap a single line to a maximum width.
+local function wrap_text(text, width)
+	local lines = {}
+	while vim.fn.strdisplaywidth(text) > width do
+		local breakpoint = width
+		local subtext = text:sub(1, breakpoint)
+		local last_space = subtext:match(".*()%s+")
+		if last_space and last_space > 1 then
+			breakpoint = last_space - 1
+		end
+		table.insert(lines, text:sub(1, breakpoint))
+		text = text:sub(breakpoint + 1):gsub("^%s+", "")
+	end
+	if text ~= "" then
+		table.insert(lines, text)
+	end
+	return lines
+end
 
--- Main configuration function.
+-- Setup function for configurable options.
 M.setup = function(user_opts)
-	-- Merge user options with defaults.
+	-- Default options.
+	local default_opts = {
+		width = 40, -- window width (characters)
+		height = 20, -- window height (lines)
+		row = 1,
+		col = vim.o.columns - 45,
+		border = "single",
+		title = { { "Twitch Chat" } },
+		title_pos = "right",
+		winblend = 10,
+		max_lines = 100,
+		channel = "",
+		client_id = "", -- Twitch API client ID (required)
+		client_secret = "", -- Twitch API client secret (required)
+	}
 	local opts = vim.tbl_deep_extend("force", default_opts, user_opts or {})
 
 	local prev_win = vim.api.nvim_get_current_win()
@@ -36,18 +53,17 @@ M.setup = function(user_opts)
 		title_pos = opts.title_pos,
 	}
 	local buf = vim.api.nvim_create_buf(false, true)
-	-- Open the window without taking focus.
 	local win = vim.api.nvim_open_win(buf, false, win_opts)
 	vim.api.nvim_set_option_value("winblend", opts.winblend, { win = win })
 	vim.api.nvim_set_option_value("wrap", true, { win = win })
 
-	-- Make the buffer non-editable.
+	-- Make buffer non-editable.
 	vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
 	vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 	vim.api.nvim_set_option_value("readonly", true, { buf = buf })
 
-	-- Return focus if this window is entered.
+	-- Autocommand: if focus enters our chat window, switch back to the previous window.
 	vim.api.nvim_create_autocmd("WinEnter", {
 		buffer = buf,
 		callback = function()
@@ -57,11 +73,10 @@ M.setup = function(user_opts)
 		end,
 	})
 
-	-- Define highlight for the nickname.
+	-- Define a highlight group for the nickname: bold with 10% transparency.
 	vim.api.nvim_set_hl(0, "TwitchChatNickname", { bold = true, blend = 10, fg = "#ffffff" })
 	local ns = vim.api.nvim_create_namespace("TwitchChat")
 
-	-- Function to fetch OAuth token from Twitch.
 	local function fetch_oauth_token()
 		local http = require("socket.http")
 		local ltn12 = require("ltn12")
@@ -100,7 +115,6 @@ M.setup = function(user_opts)
 		return
 	end
 
-	-- Connect to Twitch IRC via LuaSocket.
 	local socket = require("socket")
 	local ws = socket.tcp()
 	ws:settimeout(5)
@@ -123,22 +137,31 @@ M.setup = function(user_opts)
 				local message = data:match("PRIVMSG%s+#[%w_]+%s+:(.+)")
 				if user and message then
 					vim.schedule(function()
+						-- Temporarily allow modifications.
 						vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
 						vim.api.nvim_set_option_value("readonly", false, { buf = buf })
+
 						local full_line = user .. ": " .. message
+						-- Split by newline (if any) then wrap each line.
+						local raw_lines = vim.split(full_line, "\n")
 						local wrapped = {}
-						for _, l in ipairs(require("telescope.utils").string_split(full_line, "\n")) do
-							for _, line in ipairs(wrap_text(l, opts.width)) do
-								table.insert(wrapped, line)
+						for _, l in ipairs(raw_lines) do
+							for _, w in ipairs(wrap_text(l, opts.width)) do
+								table.insert(wrapped, w)
 							end
 						end
+
 						local current_line = vim.api.nvim_buf_line_count(buf)
 						vim.api.nvim_buf_set_lines(buf, current_line, current_line, false, wrapped)
+						-- Highlight the nickname on the first wrapped line.
 						vim.api.nvim_buf_add_highlight(buf, ns, "TwitchChatNickname", current_line, 0, #user)
+
+						-- Trim the buffer if it exceeds the max lines.
 						local total = vim.api.nvim_buf_line_count(buf)
 						if total > opts.max_lines then
 							vim.api.nvim_buf_set_lines(buf, 0, total - opts.max_lines, false, {})
 						end
+
 						vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 						vim.api.nvim_set_option_value("readonly", true, { buf = buf })
 					end)
@@ -149,25 +172,6 @@ M.setup = function(user_opts)
 			ws:close()
 		end
 	end)
-end
-
--- A helper function to wrap text into lines no longer than a given width.
-function wrap_text(text, width)
-	local lines = {}
-	while vim.fn.strdisplaywidth(text) > width do
-		local breakpoint = width
-		local subtext = text:sub(1, breakpoint)
-		local last_space = subtext:match(".*()%s+")
-		if last_space and last_space > 1 then
-			breakpoint = last_space - 1
-		end
-		table.insert(lines, text:sub(1, breakpoint))
-		text = text:sub(breakpoint + 1):gsub("^%s+", "")
-	end
-	if text ~= "" then
-		table.insert(lines, text)
-	end
-	return lines
 end
 
 return M
